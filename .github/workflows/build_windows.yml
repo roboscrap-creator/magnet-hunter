@@ -15,10 +15,17 @@ jobs:
           channel: 'stable'
       - name: Gerar estrutura Windows
         run: flutter create --platforms=windows --org com.roboscrap.hunter .
-      - name: Configurar flag STL1011 no CMakeLists do Windows
-        run: Add-Content -Path "windows\CMakeLists.txt" -Value "`nadd_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)"
-      - name: Baixar pacotes
+      - name: Baixar pacotes e gerar symlinks
         run: flutter pub get
+      - name: Configurar flag STL1011 no CMakeLists raiz e do plugin
+        shell: pwsh
+        run: |
+          $rootCmake = Get-Content "windows\CMakeLists.txt"
+          Set-Content "windows\CMakeLists.txt" -Value (@("add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)") + $rootCmake)
+          $pluginCmake = "windows\flutter\ephemeral\.plugin_symlinks\webview_windows\windows\CMakeLists.txt"
+          if (Test-Path $pluginCmake) {
+            Add-Content -Path $pluginCmake -Value "`ntarget_compile_definitions(`${PLUGIN_NAME} PRIVATE _SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)"
+          }
       - name: Compilar Windows Release
         run: flutter build windows --release
       - name: Compactar pasta Release do Windows
