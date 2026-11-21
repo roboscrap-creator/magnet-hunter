@@ -15,6 +15,8 @@ jobs:
           channel: 'stable'
       - name: Gerar estrutura Windows
         run: flutter create --platforms=windows --org com.roboscrap.hunter .
+      - name: Configurar flag STL1011 no CMakeLists do Windows
+        run: Add-Content -Path "windows\CMakeLists.txt" -Value "`nadd_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)"
       - name: Baixar pacotes
         run: flutter pub get
       - name: Compilar Windows Release
