@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_windows/webview_windows.dart';
@@ -20,7 +21,7 @@ class MagnetHunterApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'MagnetHunter',
+      title: 'MagnetHunter Turbo',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF0C0F14),
@@ -75,6 +76,7 @@ class BrowserTab {
   WebViewController? mobileCtrl;
   WebviewController? winCtrl;
   bool winReady;
+  DateTime? lastScanAt;
 
   BrowserTab({
     required this.id,
@@ -103,6 +105,8 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
   final Map<String, MagnetItem> _captados = {};
   final Set<String> _selecionados = {};
   bool _autoScan = true;
+  bool _modoTurbo = true;
+  bool _httpRaspando = false;
 
   @override
   void initState() {
@@ -116,6 +120,7 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
     final raw = prefs.getString('hunter_captados') ?? '[]';
     try {
       final list = jsonDecode(raw) as List;
+      if (!mounted) return;
       setState(() {
         for (final e in list) {
           final item = MagnetItem.fromJson(Map<String, dynamic>.from(e as Map));
@@ -178,7 +183,7 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
       }
     }
     if (novos > 0) {
-      setState(() {});
+      if (mounted) setState(() {});
       _salvarCaptados();
       if (notificar && mounted) {
         ScaffoldMessenger.of(context).clearSnackBars();
@@ -194,10 +199,37 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
     return novos;
   }
 
+  static const String _jsAcelerador = '''
+  (function() {
+    if (!document.getElementById('mh-turbo-style')) {
+      var st = document.createElement('style');
+      st.id = 'mh-turbo-style';
+      st.textContent = 'iframe, video, audio, object, embed, [class*="ads"], [id*="ads"], [class*="banner"], [class*="popup"] { display: none !important; visibility: hidden !important; } * { animation: none !important; transition: none !important; }';
+      (document.head || document.documentElement).appendChild(st);
+    }
+    document.querySelectorAll('a[target="_blank"]').forEach(function(a) { a.removeAttribute('target'); });
+    document.querySelectorAll('video, audio').forEach(function(m) { try { m.pause(); m.src = ''; } catch(e){} });
+  })();
+  ''';
+
   Future<void> _escanearPaginaAtual({bool manual = false}) async {
     if (_tabs.isEmpty) return;
     final tab = _tabs[_activeTabIndex];
+    final agora = DateTime.now();
+    if (!manual && tab.lastScanAt != null && agora.difference(tab.lastScanAt!).inMilliseconds < 1500) {
+      return;
+    }
+    tab.lastScanAt = agora;
+
     try {
+      if (_modoTurbo) {
+        if (isWindowsDesktop && tab.winCtrl != null && tab.winReady) {
+          await tab.winCtrl!.executeScript(_jsAcelerador);
+        } else if (tab.mobileCtrl != null) {
+          await tab.mobileCtrl!.runJavaScript(_jsAcelerador);
+        }
+      }
+
       const js = '''
       (function() {
         var found = [];
@@ -243,6 +275,42 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
     } catch (_) {}
   }
 
+  Future<void> _rasparUrlDiretaHttp(String rawUrl) async {
+    var u = rawUrl.trim();
+    if (u.isEmpty) return;
+    if (!u.startsWith('http://') && !u.startsWith('https://')) u = 'https://$u';
+    setState(() => _httpRaspando = true);
+    try {
+      final resp = await http.get(
+        Uri.parse(u),
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+        },
+      ).timeout(const Duration(seconds: 12));
+
+      final matches = RegExp(r'''magnet:\?xt=urn:btih:[a-zA-Z0-9]+[^\s"'<>\\]*''', caseSensitive: false).allMatches(resp.body);
+      final encontrados = matches.map((m) => m.group(0) ?? '').where((s) => s.isNotEmpty).toList();
+      final novos = _adicionarMagnets(encontrados, u, notificar: false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: novos > 0 ? Colors.teal.shade800 : Colors.blueGrey.shade800,
+            content: Text('Turbo HTTP: ${encontrados.length} encontrado(s), +$novos novo(s) salvo(s)!'),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Falha no Turbo HTTP (site pode exigir JS): $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _httpRaspando = false);
+    }
+  }
+
   Future<void> _initWindowsTab(BrowserTab tab, String urlInicial) async {
     final ctrl = WebviewController();
     tab.winCtrl = ctrl;
@@ -256,26 +324,31 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
           _adicionarMagnets([url], tab.currentUrl);
           return;
         }
-        setState(() {
-          tab.currentUrl = url;
-          if (_tabs.isNotEmpty && _tabs[_activeTabIndex].id == tab.id) {
-            _urlCtrl.text = url;
-          }
-        });
+        tab.currentUrl = url;
+        if (_tabs.isNotEmpty && _tabs[_activeTabIndex].id == tab.id && _urlCtrl.text != url) {
+          _urlCtrl.text = url;
+        }
       });
       ctrl.title.listen((t) {
         if (!mounted) return;
-        if (t.trim().isNotEmpty) {
+        if (t.trim().isNotEmpty && tab.title != t.trim()) {
           setState(() => tab.title = t.trim());
         }
       });
       ctrl.loadingState.listen((state) async {
         if (!mounted) return;
         final loading = state == LoadingState.loading;
-        setState(() => tab.isLoading = loading);
-        if (!loading && _autoScan) {
-          await Future.delayed(const Duration(milliseconds: 600));
-          _escanearPaginaAtual();
+        if (tab.isLoading != loading) {
+          setState(() => tab.isLoading = loading);
+        }
+        if (!loading) {
+          if (_modoTurbo) {
+            await ctrl.executeScript(_jsAcelerador);
+          }
+          if (_autoScan) {
+            await Future.delayed(const Duration(milliseconds: 500));
+            _escanearPaginaAtual();
+          }
         }
       });
       await ctrl.loadUrl(urlInicial);
@@ -314,13 +387,13 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
         NavigationDelegate(
           onPageStarted: (url) {
             if (!mounted) return;
-            setState(() {
-              tab.isLoading = true;
-              tab.currentUrl = url;
-              if (_tabs.isNotEmpty && _tabs[_activeTabIndex].id == tab.id) {
-                _urlCtrl.text = url;
-              }
-            });
+            tab.currentUrl = url;
+            if (!tab.isLoading) {
+              setState(() => tab.isLoading = true);
+            }
+            if (_tabs.isNotEmpty && _tabs[_activeTabIndex].id == tab.id) {
+              _urlCtrl.text = url;
+            }
           },
           onPageFinished: (url) async {
             if (!mounted) return;
@@ -333,13 +406,11 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
                 _urlCtrl.text = url;
               }
             });
-            await tab.mobileCtrl?.runJavaScript('''
-              document.querySelectorAll('a[target="_blank"]').forEach(function(a) {
-                a.removeAttribute('target');
-              });
-            ''');
+            if (_modoTurbo) {
+              await tab.mobileCtrl?.runJavaScript(_jsAcelerador);
+            }
             if (_autoScan) {
-              await Future.delayed(const Duration(milliseconds: 600));
+              await Future.delayed(const Duration(milliseconds: 500));
               _escanearPaginaAtual();
             }
           },
@@ -489,14 +560,27 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
     );
   }
 
-  Widget _buildWebView(BrowserTab tab) {
-    if (isWindowsDesktop) {
-      if (!tab.winReady || tab.winCtrl == null) {
-        return const Center(child: CircularProgressIndicator(color: Colors.tealAccent));
-      }
-      return Webview(tab.winCtrl!);
+  Widget _buildWebViewArea() {
+    if (_tabs.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
     }
-    return WebViewWidget(controller: tab.mobileCtrl!);
+    return Stack(
+      children: List.generate(_tabs.length, (i) {
+        final tab = _tabs[i];
+        final ativo = i == _activeTabIndex;
+        return Offstage(
+          offstage: !ativo,
+          child: TickerMode(
+            enabled: ativo,
+            child: isWindowsDesktop
+                ? ((!tab.winReady || tab.winCtrl == null)
+                    ? const Center(child: CircularProgressIndicator(color: Colors.tealAccent))
+                    : Webview(tab.winCtrl!))
+                : WebViewWidget(controller: tab.mobileCtrl!),
+          ),
+        );
+      }),
+    );
   }
 
   @override
@@ -554,6 +638,13 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
                         ),
                       ),
                     ),
+                  ),
+                  IconButton(
+                    tooltip: 'Turbo HTTP: raspar URL atual sem renderizar página',
+                    icon: _httpRaspando
+                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.amber))
+                        : const Icon(Icons.bolt, color: Colors.amber),
+                    onPressed: _httpRaspando ? null : () => _rasparUrlDiretaHttp(_urlCtrl.text),
                   ),
                   IconButton(
                     tooltip: 'Captar Magnets desta página',
@@ -646,21 +737,16 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
                   ),
               ],
             ),
-      body: _abaInferior == 0
-          ? (currentTab == null
-              ? const Center(child: CircularProgressIndicator())
-              : Column(
-                  children: [
-                    if (currentTab.isLoading) const LinearProgressIndicator(minHeight: 2, color: Colors.tealAccent),
-                    Expanded(
-                      key: ValueKey(currentTab.id),
-                      child: _buildWebView(currentTab),
-                    ),
-                  ],
-                ))
-          : IndexedStack(
-              index: 0,
-              children: [
+      body: IndexedStack(
+        index: _abaInferior,
+        children: [
+          Column(
+            children: [
+              if (currentTab != null && currentTab.isLoading)
+                const LinearProgressIndicator(minHeight: 2, color: Colors.tealAccent),
+              Expanded(child: _buildWebViewArea()),
+            ],
+          ),
           Column(
             children: [
               Padding(
@@ -711,6 +797,14 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
                     SwitchListTile(
                       dense: true,
                       contentPadding: EdgeInsets.zero,
+                      activeThumbColor: Colors.amber,
+                      title: const Text('Modo Turbo (bloqueia iframes, vídeos e anúncios pesados)', style: TextStyle(fontSize: 12.5)),
+                      value: _modoTurbo,
+                      onChanged: (v) => setState(() => _modoTurbo = v),
+                    ),
+                    SwitchListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
                       activeThumbColor: Colors.tealAccent,
                       title: const Text('Radar automático ao navegar nas páginas', style: TextStyle(fontSize: 12.5)),
                       value: _autoScan,
@@ -725,7 +819,7 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
                         child: Padding(
                           padding: EdgeInsets.all(24),
                           child: Text(
-                            'Nenhum magnet captado ainda.\nNavegue em qualquer site público na aba "Navegador" ou toque no ícone de colar texto acima.',
+                            'Nenhum magnet captado ainda.\nNavegue na aba "Navegador", use o raio ⚡ para raspagem instantânea ou cole texto acima.',
                             textAlign: TextAlign.center,
                             style: TextStyle(color: Colors.white60),
                           ),
