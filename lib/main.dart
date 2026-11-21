@@ -650,7 +650,7 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
         onTap: (i) => setState(() => _abaInferior = i),
         items: [
           BottomNavigationBarItem(icon: const Icon(Icons.public), label: 'Navegador (${_tabs.length})'),
-          BottomNavigationBarItem(icon: const Icon(Icons.magnet_outlined), label: 'Captados (${_captados.length})'),
+          BottomNavigationBarItem(icon: const Icon(Icons.link), label: 'Captados (${_captados.length})'),
         ],
       ),
     );
