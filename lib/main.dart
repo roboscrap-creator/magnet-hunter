@@ -1,9 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:webview_windows/webview_windows.dart';
+
+bool get isWindowsDesktop => !kIsWeb && Platform.isWindows;
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -68,13 +72,17 @@ class BrowserTab {
   String title;
   String currentUrl;
   bool isLoading;
-  final WebViewController controller;
+  WebViewController? mobileCtrl;
+  WebviewController? winCtrl;
+  bool winReady;
 
   BrowserTab({
     required this.id,
     required this.title,
     required this.currentUrl,
-    required this.controller,
+    this.mobileCtrl,
+    this.winCtrl,
+    this.winReady = false,
     this.isLoading = false,
   });
 }
@@ -207,7 +215,14 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
         return JSON.stringify(Array.from(found));
       })();
       ''';
-      final res = await tab.controller.runJavaScriptReturningResult(js);
+      dynamic res;
+      if (isWindowsDesktop && tab.winCtrl != null && tab.winReady) {
+        res = await tab.winCtrl!.executeScript(js);
+      } else if (tab.mobileCtrl != null) {
+        res = await tab.mobileCtrl!.runJavaScriptReturningResult(js);
+      } else {
+        return;
+      }
       String rawStr = res.toString();
       if (rawStr.startsWith('"') && rawStr.endsWith('"')) {
         rawStr = jsonDecode(rawStr).toString();
@@ -222,9 +237,70 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
     } catch (_) {}
   }
 
+  Future<void> _initWindowsTab(BrowserTab tab, String urlInicial) async {
+    final ctrl = WebviewController();
+    tab.winCtrl = ctrl;
+    try {
+      await ctrl.initialize();
+      await ctrl.setBackgroundColor(const Color(0xFF0C0F14));
+      await ctrl.setPopupWindowPolicy(WebviewPopupWindowPolicy.sameWindow);
+      ctrl.url.listen((url) {
+        if (!mounted) return;
+        if (url.toLowerCase().startsWith('magnet:?')) {
+          _adicionarMagnets([url], tab.currentUrl);
+          return;
+        }
+        setState(() {
+          tab.currentUrl = url;
+          if (_tabs.isNotEmpty && _tabs[_activeTabIndex].id == tab.id) {
+            _urlCtrl.text = url;
+          }
+        });
+      });
+      ctrl.title.listen((t) {
+        if (!mounted) return;
+        if (t.trim().isNotEmpty) {
+          setState(() => tab.title = t.trim());
+        }
+      });
+      ctrl.loadingState.listen((state) async {
+        if (!mounted) return;
+        final loading = state == LoadingState.loading;
+        setState(() => tab.isLoading = loading);
+        if (!loading && _autoScan) {
+          await Future.delayed(const Duration(milliseconds: 600));
+          _escanearPaginaAtual();
+        }
+      });
+      await ctrl.loadUrl(urlInicial);
+      if (mounted) {
+        setState(() => tab.winReady = true);
+      }
+    } catch (_) {}
+  }
+
   void _abrirNovaAba(String urlInicial, {bool selecionar = true}) {
     final id = DateTime.now().microsecondsSinceEpoch.toString();
     late BrowserTab tab;
+
+    if (isWindowsDesktop) {
+      tab = BrowserTab(
+        id: id,
+        title: 'Nova Aba',
+        currentUrl: urlInicial,
+        isLoading: true,
+      );
+      setState(() {
+        _tabs.add(tab);
+        if (selecionar) {
+          _activeTabIndex = _tabs.length - 1;
+          _urlCtrl.text = urlInicial;
+        }
+      });
+      _initWindowsTab(tab, urlInicial);
+      return;
+    }
+
     final ctrl = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setUserAgent('Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36')
@@ -242,7 +318,7 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
           },
           onPageFinished: (url) async {
             if (!mounted) return;
-            final t = await tab.controller.getTitle();
+            final t = await tab.mobileCtrl?.getTitle();
             setState(() {
               tab.isLoading = false;
               tab.currentUrl = url;
@@ -251,7 +327,7 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
                 _urlCtrl.text = url;
               }
             });
-            await tab.controller.runJavaScript('''
+            await tab.mobileCtrl?.runJavaScript('''
               document.querySelectorAll('a[target="_blank"]').forEach(function(a) {
                 a.removeAttribute('target');
               });
@@ -277,7 +353,7 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
       id: id,
       title: 'Nova Aba',
       currentUrl: urlInicial,
-      controller: ctrl,
+      mobileCtrl: ctrl,
       isLoading: true,
     );
 
@@ -292,9 +368,11 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
 
   void _fecharAba(int index) {
     if (_tabs.length == 1) {
-      _tabs[0].controller.loadRequest(Uri.parse('https://duckduckgo.com'));
+      _navegarNaAba(_tabs[0], 'https://duckduckgo.com');
       return;
     }
+    final removida = _tabs[index];
+    removida.winCtrl?.dispose();
     setState(() {
       _tabs.removeAt(index);
       if (_activeTabIndex >= _tabs.length) {
@@ -302,6 +380,14 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
       }
       _urlCtrl.text = _tabs[_activeTabIndex].currentUrl;
     });
+  }
+
+  void _navegarNaAba(BrowserTab tab, String url) {
+    if (isWindowsDesktop) {
+      tab.winCtrl?.loadUrl(url);
+    } else {
+      tab.mobileCtrl?.loadRequest(Uri.parse(url));
+    }
   }
 
   void _navegarPara(String entrada) {
@@ -318,8 +404,19 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
         q = 'https://duckduckgo.com/?q=${Uri.encodeComponent(q)}';
       }
     }
-    _tabs[_activeTabIndex].controller.loadRequest(Uri.parse(q));
+    _navegarNaAba(_tabs[_activeTabIndex], q);
     FocusScope.of(context).unfocus();
+  }
+
+  Directory? _resolverPastaDownloads() {
+    if (isWindowsDesktop) {
+      final home = Platform.environment['USERPROFILE'] ?? '';
+      if (home.isNotEmpty) {
+        return Directory('$home\\Downloads');
+      }
+      return null;
+    }
+    return Directory('/storage/emulated/0/Download');
   }
 
   Future<void> _exportarArquivoTxt() async {
@@ -329,15 +426,16 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
     try {
       final now = DateTime.now();
       final nome = 'magnets_${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}.txt';
-      final dir = Directory('/storage/emulated/0/Download');
-      if (await dir.exists()) {
-        final file = File('${dir.path}/$nome');
+      final dir = _resolverPastaDownloads();
+      if (dir != null && await dir.exists()) {
+        final sep = isWindowsDesktop ? '\\' : '/';
+        final file = File('${dir.path}$sep$nome');
         await file.writeAsString(conteudo);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               backgroundColor: Colors.green,
-              content: Text('Salvo em Downloads/$nome (${itens.length} links)! Agora anexe no RoboScrap.'),
+              content: Text('Salvo em Downloads/$nome (${itens.length} links)!'),
             ),
           );
         }
@@ -385,6 +483,16 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
     );
   }
 
+  Widget _buildWebView(BrowserTab tab) {
+    if (isWindowsDesktop) {
+      if (!tab.winReady || tab.winCtrl == null) {
+        return const Center(child: CircularProgressIndicator(color: Colors.tealAccent));
+      }
+      return Webview(tab.winCtrl!);
+    }
+    return WebViewWidget(controller: tab.mobileCtrl!);
+  }
+
   @override
   Widget build(BuildContext context) {
     final currentTab = _tabs.isNotEmpty ? _tabs[_activeTabIndex] : null;
@@ -399,16 +507,20 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
                   IconButton(
                     icon: const Icon(Icons.arrow_back_ios_new, size: 17),
                     onPressed: () async {
-                      if (await currentTab.controller.canGoBack()) {
-                        currentTab.controller.goBack();
+                      if (isWindowsDesktop) {
+                        await currentTab.winCtrl?.goBack();
+                      } else if (await currentTab.mobileCtrl?.canGoBack() ?? false) {
+                        await currentTab.mobileCtrl?.goBack();
                       }
                     },
                   ),
                   IconButton(
                     icon: const Icon(Icons.arrow_forward_ios, size: 17),
                     onPressed: () async {
-                      if (await currentTab.controller.canGoForward()) {
-                        currentTab.controller.goForward();
+                      if (isWindowsDesktop) {
+                        await currentTab.winCtrl?.goForward();
+                      } else if (await currentTab.mobileCtrl?.canGoForward() ?? false) {
+                        await currentTab.mobileCtrl?.goForward();
                       }
                     },
                   ),
@@ -426,7 +538,13 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
                         border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
                         suffixIcon: IconButton(
                           icon: Icon(currentTab.isLoading ? Icons.close : Icons.refresh, size: 18),
-                          onPressed: () => currentTab.controller.reload(),
+                          onPressed: () {
+                            if (isWindowsDesktop) {
+                              currentTab.winCtrl?.reload();
+                            } else {
+                              currentTab.mobileCtrl?.reload();
+                            }
+                          },
                         ),
                       ),
                     ),
@@ -470,7 +588,7 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
                                 child: Row(
                                   children: [
                                     ConstrainedBox(
-                                      constraints: const BoxConstraints(maxWidth: 110),
+                                      constraints: const BoxConstraints(maxWidth: 130),
                                       child: Text(
                                         t.title,
                                         maxLines: 1,
@@ -530,7 +648,7 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
               : Column(
                   children: [
                     if (currentTab.isLoading) const LinearProgressIndicator(minHeight: 2, color: Colors.tealAccent),
-                    Expanded(child: WebViewWidget(controller: currentTab.controller)),
+                    Expanded(child: _buildWebView(currentTab)),
                   ],
                 ),
           Column(

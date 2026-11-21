@@ -1,7 +1,7 @@
 name: magnet_hunter
-description: Navegador Multi-Abas Coletor de Magnets para RoboScrap
+description: Navegador Multi-Abas Coletor de Magnets para RoboScrap (Android e Windows)
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.1.0+2
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -10,6 +10,7 @@ dependencies:
   flutter:
     sdk: flutter
   webview_flutter: ^4.9.0
+  webview_windows: ^0.4.0
   http: ^1.2.1
   shared_preferences: ^2.2.3
 
