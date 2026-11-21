@@ -200,19 +200,25 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
     try {
       const js = '''
       (function() {
-        var found = new Set();
-        var re = /magnet:\\?xt=urn:btih:[a-zA-Z0-9]+[^\\s"'<>\\\\]*/gi;
-        var html = document.documentElement ? document.documentElement.innerHTML : '';
-        var text = document.body ? document.body.innerText : '';
-        var m1 = html.match(re) || [];
-        var m2 = text.match(re) || [];
-        m1.forEach(function(x){ found.add(x); });
-        m2.forEach(function(x){ found.add(x); });
-        document.querySelectorAll('a[href^="magnet:"], [data-magnet], [data-url^="magnet:"]').forEach(function(el){
-          var h = el.getAttribute('href') || el.getAttribute('data-magnet') || el.getAttribute('data-url');
-          if (h && h.toLowerCase().startsWith('magnet:')) found.add(h);
-        });
-        return JSON.stringify(Array.from(found));
+        var found = [];
+        var seen = {};
+        var links = document.links;
+        for (var i = 0; i < links.length; i++) {
+          var h = links[i].href;
+          if (h && h.indexOf('magnet:?') === 0 && !seen[h]) {
+            seen[h] = 1;
+            found.push(h);
+          }
+        }
+        var extras = document.querySelectorAll('[data-magnet], [data-url^="magnet:"]');
+        for (var j = 0; j < extras.length; j++) {
+          var dh = extras[j].getAttribute('data-magnet') || extras[j].getAttribute('data-url');
+          if (dh && dh.indexOf('magnet:?') === 0 && !seen[dh]) {
+            seen[dh] = 1;
+            found.push(dh);
+          }
+        }
+        return JSON.stringify(found);
       })();
       ''';
       dynamic res;
@@ -640,17 +646,21 @@ class _HunterHomeScreenState extends State<HunterHomeScreen> {
                   ),
               ],
             ),
-      body: IndexedStack(
-        index: _abaInferior,
-        children: [
-          currentTab == null
+      body: _abaInferior == 0
+          ? (currentTab == null
               ? const Center(child: CircularProgressIndicator())
               : Column(
                   children: [
                     if (currentTab.isLoading) const LinearProgressIndicator(minHeight: 2, color: Colors.tealAccent),
-                    Expanded(child: _buildWebView(currentTab)),
+                    Expanded(
+                      key: ValueKey(currentTab.id),
+                      child: _buildWebView(currentTab),
+                    ),
                   ],
-                ),
+                ))
+          : IndexedStack(
+              index: 0,
+              children: [
           Column(
             children: [
               Padding(
